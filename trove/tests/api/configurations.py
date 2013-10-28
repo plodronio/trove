@@ -17,6 +17,7 @@
 
 
 import json
+from random import randint
 from datetime import datetime
 from proboscis import SkipTest
 from proboscis import test
@@ -45,6 +46,7 @@ configuration_info = None
 configuration_href = None
 configuration_instance = InstanceTestInfo()
 configuration_instance_id = None
+nondynamic_instance = InstanceTestInfo()
 sql_variables = [
     'key_buffer_size',
     'connect_timeout',
@@ -102,17 +104,21 @@ parameters_strings =[
     'default_time_zone'
 ]
 parameters_all = parameters_booleans + parameters_integers + parameters_strings
-parameters_non_dynamic_booleans = ['local_infile', 'innodb_file_per_table']
-parameters_non_dynamic_integers = [
-    'innodb_buffer_pool_size',
-    'innodb_log_buffer_size',
-    'innodb_log_file_size',
-    'innodb_open_files',
-    'ft_min_word_len',
-    'open_files_limit',
-    'server_id'
+parameters_non_dynamic_booleans = [
+    'innodb_file_per_table'
 ]
-parameters_non_dynamic_strings = ['ft_stopword_file']
+parameters_non_dynamic_integers = [
+    {'innodb_buffer_pool_size': {'min': 0, 'max': 68719476736}},
+    {'innodb_log_buffer_size': {'min': 1048576, 'max': 4294967295}},
+    {'innodb_log_file_size': {'min': 1048576, 'max': 4294967295}},
+    {'innodb_open_files': {'min': 10, 'max': 4294967295}},
+    {'ft_min_word_len': {'min': 1, 'max': 65535}},
+    {'open_files_limit': {'min': 0, 'max': 65535}},
+    {'server_id': {'min': 1, 'max': 100000}}
+]
+parameters_non_dynamic_strings = [
+    'ft_stopword_file'
+]
 parameters_non_dynamic_all = parameters_non_dynamic_booleans + \
     parameters_non_dynamic_integers + parameters_non_dynamic_strings
 parameters_dynamic_all = [x for x in parameters_all if x not in parameters_non_dynamic_all]
@@ -367,6 +373,9 @@ class CreateConfigurations(object):
 
     @test
     def test_valid_configurations_create(self):
+        """
+            test_config_004_update_configuration (section 1 of 2)
+        """
         # create a configuration with valid parameters
         values = '{"connect_timeout": 120, "key_buffer_size": 52428800}'
         expected_values = json.loads(values)
@@ -380,9 +389,15 @@ class CreateConfigurations(object):
         assert_equal(configuration_info.name, CONFIG_NAME)
         assert_equal(configuration_info.description, CONFIG_DESC)
         assert_equal(configuration_info.values, expected_values)
+        # QE extension
+        result = instance_info.dbaas.configurations.get(configuration_info.id)
+        assert_equal(expected_values, result.values)
 
     @test(runs_after=[test_valid_configurations_create])
     def test_appending_to_existing_configuration(self):
+        """
+            test_config_004_update_configuration (section 2 of 2)
+        """
         # test being able to update and insert new parameter name and values
         # to an existing configuration
         values = '{"join_buffer_size": 1048576, "connect_timeout": 60}'
@@ -390,7 +405,10 @@ class CreateConfigurations(object):
                                                 values)
         resp, body = instance_info.dbaas.client.last_response
         assert_equal(resp.status, 200)
-
+        # QE extension
+        expected_values = json.loads(values)
+        result = instance_info.dbaas.configurations.get(configuration_info.id)
+        assert_equal(expected_values, result.values)
 
 @test(depends_on=[CreateConfigurations], groups=[GROUP])
 class AfterConfigurationsCreation(object):
@@ -745,6 +763,65 @@ class MoreConfigurations(object):
         _test_configuration_is_applied_to_instance(instance_info,
                                                    configuration_id)
 
+    #qe
+    @test
+    def test_changing_configuration_with_nondynamic(self):
+        # test that changing a non-dynamic parameter is applied to instance
+        # and show that the instance requires a restart
+        values = ('{"innodb_log_buffer_size": 1048576, '
+                  '"innodb_open_files": 10}')
+        instance_info.dbaas.configurations.update(configuration_info.id,
+                                                  values)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 202)
+
+        instance_info.dbaas.configurations.get(configuration_info.id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 200)
+
+        def result_is_not_active():
+            instance = instance_info.dbaas.instances.get(
+                instance_info.id)
+            if instance.status == "ACTIVE":
+                return False
+            else:
+                return True
+        poll_until(result_is_not_active)
+
+        instance = instance_info.dbaas.instances.get(instance_info.id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 200)
+        print(instance.status)
+        assert_equal('RESTART_REQUIRED', instance.status)
+
+    @test(depends_on=[test_changing_configuration_with_nondynamic])
+    def test_restart_instance_should_return_active(self):
+        # test that after restarting the instance it becomes active
+        instance_info.dbaas.instances.restart(instance_info.id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 202)
+
+        def result_is_active():
+            instance = instance_info.dbaas.instances.get(
+                instance_info.id)
+            if instance.status == "ACTIVE":
+                return True
+            else:
+                assert_equal("REBOOT", instance.status)
+                return False
+        poll_until(result_is_active)
+
+    @test(depends_on=[test_restart_instance_should_return_active])
+    @time_out(10)
+    def test_get_configuration_from_instance_nondynamic_validation(self):
+        # validate that the configuration was applied correctly to the instance
+        if CONFIG.fake_mode:
+            raise SkipTest("configuration from sql does not work in fake mode")
+        inst = instance_info.dbaas.instances.get(instance_info.id)
+        configuration_id = inst.configuration['id']
+        _test_configuration_is_applied_to_instance(instance_info,
+                                                   configuration_id)
+
 
 @test(depends_on_classes=[MoreConfigurations], groups=[GROUP])
 class WaitForConfigurationInstanceToFinishAgain(object):
@@ -858,3 +935,230 @@ class DeleteConfigurations(object):
         instance_info.dbaas.configurations.delete(configuration_info.id)
         resp, body = instance_info.dbaas.client.last_response
         assert_equal(resp.status, 202)
+
+
+@test(groups=[GROUP])
+class NonDynamic_parameter_validation(object):
+
+    config_id = None
+
+    def config_values(self):
+        # get configuration id of instance
+        instance = instance_info.dbaas.instances.get(
+            nondynamic_instance.id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 200)
+        print(instance.configuration['id'])
+        assert_is_not_none(instance.configuration['id'])
+        self.config_id = instance.configuration['id']
+        # get configuration values based on configuration id
+        config_dict = None
+        config_info = instance_info.dbaas.configurations.get(self.config_id)
+        for k, v in config_info.values.iteritems():
+            config_dict[k] = v
+        print(config_dict)
+        assert_is_not_none(config_dict)
+        # return dictionary containing config parameters and values
+        return config_dict
+
+    def apply_configuration(self, config_key, config_value):
+        # use passed-in config parameter name and value to update instance
+        #values = ('{"join_buffer_size": 1048576, '
+        #          '"innodb_buffer_pool_size": 57671680}')
+        values = ('{"' + config_key + '": ' + str(config_value) + '}')
+        instance_info.dbaas.configurations.update(self.config_id,
+                                                  values)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 202)
+
+        # make sure getting config details is OK
+        instance_info.dbaas.configurations.get(self.config_id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 200)
+
+        # verify instance needs a Restart before becoming Active
+        def result_is_not_active():
+            instance = instance_info.dbaas.instances.get(
+                nondynamic_instance.id)
+            if instance.status == "ACTIVE":
+                return False
+            else:
+                return True
+        poll_until(result_is_not_active)
+        instance = instance_info.dbaas.instances.get(nondynamic_instance.id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 200)
+        print(instance.status)
+        assert_equal('RESTART_REQUIRED', instance.status)
+
+    def restart_instance(self):
+        instance_info.dbaas.instances.restart(nondynamic_instance.id)
+        resp, body = instance_info.dbaas.client.last_response
+        assert_equal(resp.status, 202)
+
+        def result_is_active():
+            instance = instance_info.dbaas.instances.get(
+                nondynamic_instance.id)
+            if instance.status == "ACTIVE":
+                return True
+            else:
+                assert_equal("REBOOT", instance.status)
+                return False
+        poll_until(result_is_active)
+
+    @test
+    def test_create_instance_with_configuration(self):
+        # test that a new instance will apply the configuration on create
+        if test_config.auth_strategy == "fake":
+            raise SkipTest("Skipping instance start with configuration "
+                           "test for fake mode.")
+        global nondynamic_instance
+        databases = []
+        databases.append({"name": "firstdbconfig", "character_set": "latin2",
+                          "collate": "latin2_general_ci"})
+        databases.append({"name": "db2"})
+        nondynamic_instance.databases = databases
+        users = []
+        users.append({"name": "liteconf", "password": "liteconfpass",
+                      "databases": [{"name": "firstdbconfig"}]})
+        nondynamic_instance.users = users
+        nondynamic_instance.name = "TEST_" + str(datetime.now()) + "_config"
+        flavor_href = instance_info.dbaas_flavor_href
+        nondynamic_instance.dbaas_flavor_href = flavor_href
+        nondynamic_instance.volume = instance_info.volume
+
+        result = instance_info.dbaas.instances.create(
+            nondynamic_instance.name,
+            nondynamic_instance.dbaas_flavor_href,
+            nondynamic_instance.volume,
+            nondynamic_instance.databases,
+            nondynamic_instance.users,
+            #availability_zone="nova",
+            #configuration_ref=configuration_href)
+            availability_zone="nova")
+        assert_equal(200, instance_info.dbaas.last_http_code)
+        assert_equal("BUILD", result.status)
+        nondynamic_instance.id = result.id
+
+    @test(depends_on=[test_create_instance_with_configuration])
+    def test_nondynamic_booleans_positive(self):
+        # define values for each non-dynamic boolean parameter
+        nondynamic_param = {}
+        for k in parameters_non_dynamic_booleans:
+            nondynamic_param[k] = randint(0, 1)
+        print(nondynamic_param)
+        # loop through each non-dynamic boolean parameter
+        for k, v in nondynamic_param.iteritems():
+            before_update = {}
+            after_update = {}
+            # check current config
+            before_update = self.config_values()
+            # apply valid config
+            self.apply_configuration(k, v)
+            # restart instance
+            self.restart_instance()
+            # check config value changed
+            after_update = self.config_values()
+            assert_true(before_update[k] != after_update[k])
+
+    @test(depends_on=[test_nondynamic_booleans_positive])
+    def test_nondynamic_booleans_negative(self):
+        # define invalid values for each non-dynamic boolean parameter
+        nondynamic_param = {}
+        for k in parameters_non_dynamic_booleans:
+            nondynamic_param[k] = randint(0, 1) + 0.7
+        print(nondynamic_param)
+        # loop through each non-dynamic boolean parameter
+        for k, v in nondynamic_param.iteritems():
+            before_update = {}
+            after_update = {}
+            # check current config
+            before_update = self.config_values()
+            # apply invalid config
+            try:
+                self.apply_configuration(k, v)
+            except Exception as e:
+                print(e)
+                pass
+            # restart instance
+            self.restart_instance()
+            # check config value did NOT change
+            after_update = self.config_values()
+            assert_true(before_update[k] == after_update[k])
+
+    @test(depends_on=[test_nondynamic_booleans_negative])
+    def test_nondynamic_integers_positive(self):
+        # define values for each non-dynamic integer parameter
+        nondynamic_param = {}
+        for param in parameters_non_dynamic_integers:
+            key = param.keys().pop()
+            value = randint(param[key]['min'], param[key]['max'])
+            nondynamic_param[key] = value
+        print(nondynamic_param)
+        # loop through each non-dynamic integer parameter
+        for k, v in nondynamic_param.iteritems():
+            before_update = {}
+            after_update = {}
+            # check current config
+            before_update = self.config_values()
+            # apply valid config
+            self.apply_configuration(k, v)
+            # restart instance
+            self.restart_instance()
+            # check config value changed
+            after_update = self.config_values()
+            assert_true(before_update[k] != after_update[k])
+
+    @test(depends_on=[test_nondynamic_integers_positive])
+    def test_nondynamic_integers_negative(self):
+        # define invalid values for each non-dynamic integer parameter
+        nondynamic_param = {}
+        for param in parameters_non_dynamic_integers:
+            key = param.keys().pop()
+            value = randint(param[key]['min'], param[key]['max'])
+            nondynamic_param[key] = value * (-1)
+        print(nondynamic_param)
+        # loop through each non-dynamic integer parameter
+        for k, v in nondynamic_param.iteritems():
+            before_update = {}
+            after_update = {}
+            # check current config
+            before_update = self.config_values()
+            # apply invalid config
+            try:
+                self.apply_configuration(k, v)
+            except Exception as e:
+                print(e)
+                pass
+            # restart instance
+            self.restart_instance()
+            # check config value did NOT change
+            after_update = self.config_values()
+            assert_true(before_update[k] == after_update[k])
+
+    @test(depends_on=[test_nondynamic_integers_negative])
+    def test_nondynamic_strings_positive(self):
+        # define valid values for each non-dynamic string parameter
+        nondynamic_param = {}
+        for k in parameters_non_dynamic_strings:
+            nondynamic_param[k] = "fake_string_option"
+        print(nondynamic_param)
+        # loop through each non-dynamic string parameter
+        for k, v in nondynamic_param.iteritems():
+            before_update = {}
+            after_update = {}
+            # check current config
+            before_update = self.config_values()
+            # apply valid config
+            self.apply_configuration(k, v)
+            # restart instance
+            self.restart_instance()
+            # check config value changed
+            after_update = self.config_values()
+            assert_true(before_update[k] != after_update[k])
+
+    @test(depends_on=[test_nondynamic_strings_positive])
+    @time_out(15)
+    def test_remove_instance_with_configuration(self):
+        # delete non-dynamic instance created at start of this test class
+        instance_info.dbaas.instances.delete(nondynamic_instance.id)
