@@ -152,3 +152,31 @@ class Datastores(object):
             assert_equal(e.message,
                          "Datastore version '%s' cannot be found." %
                          test_config.dbaas_datastore_version)
+
+    @test
+    def test_datastore_version_different_ds_types(self):
+        ds = [test_config.dbaas_datastore,
+              test_config.dbaas_datastore_id]
+        for ds_type in ds:
+            version = self.rd_client.datastore_versions.get(
+                ds_type, test_config.dbaas_datastore_version_id)
+            assert_equal(version.id, test_config.dbaas_datastore_version_id)
+
+    @test
+    def test_datastore_version_invalid_ds_type(self):
+        try:
+            self.rd_client.datastore_versions.list(NAME)
+        except exceptions.BadRequest as e:
+            assert_equal(e.message,
+                         "Datastore '%s' cannot be found." %
+                         NAME)
+
+    @test
+    def test_datastore_version_invalid_ds_name(self):
+        versions = [test_config.dbaas_datastore_version, NAME]
+        for ds_ver in versions:
+            try:
+                self.rd_client.datastore_versions.get(NAME, ds_ver)
+            except exceptions.BadRequest as e:
+                assert_equal(e.message, "Datastore '%s' cannot be found." %
+                             NAME)

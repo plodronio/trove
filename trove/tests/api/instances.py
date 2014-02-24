@@ -575,6 +575,29 @@ class CreateInstanceFail(object):
                          "Datastore version '%s' is not active." %
                          datastore_version)
 
+    @test
+    def test_create_failure_with_datastore_id_and_invalid_version_id(self):
+        if VOLUME_SUPPORT:
+            volume = {'size': 1}
+        else:
+            volume = None
+        instance_name = "datastore_version_notfound"
+        databases = []
+        users = []
+        datastore = CONFIG.dbaas_datastore_id
+        datastore_version_id = "z00000z0-00z0-0z00-00z0-000z000000zz"
+        try:
+            assert_raises(exceptions.NotFound,
+                          dbaas.instances.create, instance_name,
+                          instance_info.dbaas_flavor_href,
+                          volume, databases, users,
+                          datastore=datastore,
+                          datastore_version=datastore_version_id)
+        except exceptions.BadRequest as e:
+            assert_equal(e.message,
+                         "Datastore version '%s' cannot be found." %
+                         datastore_version_id)
+
 
 def assert_unprocessable(func, *args):
     try:
@@ -676,6 +699,96 @@ class CreateInstance(object):
             check.links(result._info['links'])
             if VOLUME_SUPPORT:
                 check.volume()
+
+
+@test(depends_on_classes=[InstanceSetup],
+      run_after_class=[CreateInstanceFail],
+      groups=[GROUP, GROUP_START, GROUP_START_SIMPLE, tests.INSTANCES],
+      runs_after_groups=[tests.PRE_INSTANCES, 'dbaas_quotas'])
+class CreateInstanceDatastoreAttributes(object):
+
+    """Test to create a Database Instance
+
+    Specifying a mixture of datastore type and version values.
+
+    """
+
+    @test
+    def test_create_with_datastore_type_and_version_combos(self):
+        def _result_is_active():
+            instance = dbaas.instances.get(instance_info.id)
+            if instance.status == "ACTIVE":
+                return True
+            else:
+                # If it's not ACTIVE, anything but BUILD must be
+                # an error.
+                assert_equal("BUILD", instance.status)
+                return False
+
+        def _result_is_not_found():
+            try:
+                dbaas.instances.get(instance_info.id)
+            except exceptions.NotFound as e:
+                assert_equal(e.message,
+                             "Resource %s cannot be found" %
+                             instance_info.id)
+                return True
+
+        report = CONFIG.get_report()
+        databases = []
+        databases.append({"name": "firstdb", "character_set": "latin2",
+                          "collate": "latin2_general_ci"})
+        databases.append({"name": "db2"})
+        instance_info.databases = databases
+        users = []
+        users.append({"name": "lite", "password": "litepass",
+                      "databases": [{"name": "firstdb"}]})
+        instance_info.users = users
+        if VOLUME_SUPPORT:
+            instance_info.volume = {'size': 1}
+        else:
+            instance_info.volume = None
+
+        ds_ver = [None,
+                  CONFIG.dbaas_datastore_version,
+                  CONFIG.dbaas_datastore_version_id]
+        ds_type = [CONFIG.dbaas_datastore,
+                   CONFIG.dbaas_datastore_id]
+        for version in ds_ver:
+            for name in ds_type:
+                instance_info.initial_result = dbaas.instances.create(
+                    instance_info.name,
+                    instance_info.dbaas_flavor_href,
+                    instance_info.volume,
+                    databases,
+                    users,
+                    availability_zone="nova",
+                    datastore=name,
+                    datastore_version=version)
+                assert_equal(200, dbaas.last_http_code)
+
+                result = instance_info.initial_result
+                instance_info.id = result.id
+                instance_info.dbaas_datastore_version = \
+                    result.datastore['version']
+                instance_info.dbaas_datastore = result.datastore['type']
+
+                report.log("Instance UUID = %s" % instance_info.id)
+                assert_equal("BUILD", instance_info.initial_result.status)
+
+                poll_until(_result_is_active)
+
+                details = dbaas.instances.get(instance_info.id)
+                assert_equal(200, dbaas.last_http_code)
+                assert_equal(instance_info.dbaas_datastore,
+                             details.datastore['type'])
+                assert_equal(instance_info.dbaas_datastore_version,
+                             details.datastore['version'])
+
+                dbaas.instances.delete(instance_info.id)
+                assert_equal(202, dbaas.last_http_code)
+
+                poll_until(_result_is_not_found)
 
 
 @test(depends_on_classes=[CreateInstance],
